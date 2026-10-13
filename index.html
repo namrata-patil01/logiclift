@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LogicLift – Logical Quiz</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;800&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: {
+        fontFamily: { sans: ['Sora', 'system-ui', 'sans-serif'] },
+        colors: { ink: '#0a0e27', panel: '#121743', edge: '#2a3170', violet: { 400: '#a78bfa', 500: '#8b5cf6', 600: '#7c3aed' } }
+      } }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <style>
+    .ring { transition: stroke-dashoffset 1s linear, stroke .3s; }
+    @media (prefers-reduced-motion: reduce) { .ring { transition: none; } }
+    :focus-visible { outline: 2px solid #a78bfa; outline-offset: 2px; }
+  </style>
+</head>
+<body class="bg-ink text-slate-100 font-sans min-h-screen">
+  <header id="nav" class="border-b border-edge"></header>
+  <main id="app" class="max-w-3xl mx-auto px-4 py-8"></main>
+  <div id="toast" class="fixed bottom-4 left-1/2 -translate-x-1/2 hidden px-4 py-2 rounded-lg bg-violet-600 text-sm shadow-lg"></div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
