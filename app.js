@@ -69,7 +69,9 @@ function viewAuth(mode) {
     <h1 class="text-2xl font-extrabold mb-1">${titles[mode]}</h1>
     <p class="text-slate-400 text-sm mb-5">Train your logic, one timed question at a time.</p>
     <div class="space-y-3">
-      ${mode === 'signup' ? `<input id="a-name" class="${input}" placeholder="Full name" autocomplete="name">` : ''}
+      ${mode === 'signup' ? `<input id="a-name" class="${input}" placeholder="Full name" autocomplete="name">
+      <select id="a-role" class="${input}">
+        <option value="student">I am a student</option><option value="teacher">I am a teacher</option></select>` : ''}
       <input id="a-email" type="email" class="${input}" placeholder="Email" autocomplete="email">
       ${mode !== 'reset' ? `<input id="a-pass" type="password" class="${input}" placeholder="Password (min 8 characters)" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}">` : ''}
       <button class="${btn} w-full" onclick="doAuth('${mode}')">${titles[mode]}</button>
@@ -90,7 +92,8 @@ async function doAuth(mode) {
     if (!pass || pass.length < 8) return toast('Password must be at least 8 characters.');
     if (mode === 'signup') {
       const full_name = document.getElementById('a-name').value.trim();
-      const { data, error } = await sb.auth.signUp({ email, password: pass, options: { data: { full_name } } });
+      const account_type = document.getElementById('a-role').value;
+      const { data, error } = await sb.auth.signUp({ email, password: pass, options: { data: { full_name, account_type } } });
       if (error) throw error;
       if (!data.session) { toast('Account created. Confirm your email, then sign in.'); viewAuth('login'); }
     } else {
@@ -114,8 +117,10 @@ async function saveNewPassword() {
 }
 
 /* ---------- home / quiz setup ---------- */
-function viewHome() {
+async function viewHome() {
   clearInterval(S.quiz?.timer);
+  const { data: tch } = await sb.from('profiles').select('id, full_name').eq('role', 'teacher').order('full_name');
+  S.teachers = tch || [];
   app.innerHTML = `<div class="${card}">
     <h1 class="text-2xl font-extrabold">Hi ${esc(S.profile?.full_name || 'there')}, pick your challenge</h1>
     <div class="grid sm:grid-cols-2 gap-4 mt-6">
@@ -130,6 +135,10 @@ function viewHome() {
             <div class="font-semibold">Online API</div>
             <div class="text-xs text-slate-400 mt-1">Fresh questions from the internet, translated to your language.</div></button>
         </div></div>
+      <label id="s-teacher-wrap" class="block text-sm text-slate-400 sm:col-span-2">Teacher
+        <select id="s-teacher" class="${input} mt-1">
+          <option value="sample">LogicLift sample questions</option>
+          ${S.teachers.map(t => `<option value="${esc(t.id)}">${esc(t.full_name || 'Unnamed teacher')}</option>`).join('')}</select></label>
       <label class="block text-sm text-slate-400">Language
         <select id="s-lang" class="${input} mt-1">${opts(LANGS)}</select></label>
       <label class="block text-sm text-slate-400">Subject
@@ -149,6 +158,7 @@ function setSource(v) {
 }
 function srcChanged() {
   const api = document.getElementById('s-source').value === 'api';
+  document.getElementById('s-teacher-wrap').classList.toggle('hidden', api);
   ['db', 'api'].forEach(k => {
     const on = (k === 'api') === api;
     document.getElementById('src-' + k).className =
@@ -165,8 +175,10 @@ const mk = (question, options, answer, hint, explanation, id) => ({
   explanation: explanation || '',
 });
 async function fetchDb(c) {
-  const { data, error } = await sb.from('questions').select('*')
+  let q = sb.from('questions').select('*')
     .eq('language', c.language).eq('subject', c.subject).eq('difficulty', c.difficulty);
+  q = c.teacher === 'sample' ? q.is('created_by', null) : q.eq('created_by', c.teacher);
+  const { data, error } = await q;
   if (error) throw error;
   return shuffle(data).slice(0, c.count).map(x => mk(x.question, x.options, x.answer, x.hint, x.explanation, x.id));
 }
@@ -203,15 +215,16 @@ async function translateQs(qs, lang) {
     return out;
   } catch (e) {
     toast('Translation limit reached, so these questions are in English.');
+    qs.failed = true;
     return qs;
   }
 }
-
 async function startQuiz() {
   const c = {
     source: document.getElementById('s-source').value, language: document.getElementById('s-lang').value,
     subject: document.getElementById('s-subject').value, difficulty: document.getElementById('s-level').value,
     count: +document.getElementById('s-count').value,
+    teacher: document.getElementById('s-teacher').value,
   };
   try {
     const qs = c.source === 'api' ? await fetchApi(c) : await fetchDb(c);
@@ -284,7 +297,8 @@ async function finishQuiz() {
   S.result = res; sfx.done();
   const { error } = await sb.from('attempts').insert({
     user_id: S.user.id, language: res.language, subject: res.subject, difficulty: res.difficulty,
-    source: res.source, score, total: res.total, time_taken: res.time_taken, details: A });
+    source: res.source, score, total: res.total, time_taken: res.time_taken, details: A,
+    teacher_id: res.source === 'db' && res.teacher !== 'sample' ? res.teacher : null });
   if (error) toast('Could not save this attempt: ' + error.message);
   viewResult();
 }
@@ -386,27 +400,75 @@ async function viewHistory() {
 function openAttempt(i) { S.result = S.hist[i]; viewResult(); }
 
 /* ---------- teacher dashboard ---------- */
-async function viewTeacher(tab = 'questions') {
+const FORMAT_HELP = `1. What comes next: 2, 4, 8, ?
+A) 10
+B) 12
+C) 16
+D) 14
+Answer: C
+Hint: Each number doubles.
+Explanation: 8 x 2 = 16.
+
+2. Next question here...
+A) ...`;
+
+async function viewTeacher(tab = 'upload') {
   if (S.profile?.role !== 'teacher') return toast('Teachers only.');  // real protection is RLS in the database
-  const tabs = `<div class="flex gap-2 mb-5">
-    <button class="${tab === 'questions' ? btn : btn2}" onclick="viewTeacher('questions')">Questions</button>
-    <button class="${tab === 'attempts' ? btn : btn2}" onclick="viewTeacher('attempts')">Student attempts</button></div>`;
-  if (tab === 'attempts') {
-    const { data, error } = await sb.from('attempts').select('*, profiles(full_name)').order('created_at', { ascending: false }).limit(100);
-    if (error) return toast(error.message);
-    app.innerHTML = `<h1 class="text-2xl font-extrabold mb-4">Teacher dashboard</h1>${tabs}
-      <div class="overflow-x-auto ${card} !p-0"><table class="w-full text-sm">
-        <thead class="text-left text-slate-400"><tr><th class="p-3">Student</th><th>Subject</th><th>Level</th><th>Score</th><th>Date</th></tr></thead>
-        <tbody>${data.map(a => `<tr class="border-t border-edge"><td class="p-3">${esc(a.profiles?.full_name || 'Unnamed')}</td>
-          <td>${esc(a.subject)}</td><td>${esc(a.difficulty)}</td><td>${a.score}/${a.total}</td><td>${fmt(a.created_at)}</td></tr>`).join('')}</tbody></table></div>`;
+  const t = (k, l) => `<button class="${tab === k ? btn : btn2}" onclick="viewTeacher('${k}')">${l}</button>`;
+  const head = `<h1 class="text-2xl font-extrabold mb-4">Teacher dashboard</h1>
+    <div class="flex flex-wrap gap-2 mb-5">${t('upload', 'Upload PDF')}${t('api', 'Import from API')}${t('questions', 'My questions')}${t('attempts', 'Student results')}</div>`;
+
+  if (tab === 'upload') {
+    S.parsed = null;
+    app.innerHTML = `${head}<div class="${card} space-y-3">
+      <h2 class="font-semibold">Add questions from a PDF</h2>
+      <div class="grid sm:grid-cols-3 gap-3">
+        <select id="u-lang" class="${input}">${opts(LANGS)}</select>
+        <select id="u-subject" class="${input}">${opts(SUBJECTS)}</select>
+        <select id="u-level" class="${input}">${opts(LEVELS)}</select></div>
+      <p class="text-xs text-slate-400">These 3 choices apply to every question in the file.</p>
+      <input id="u-file" type="file" accept=".pdf,.txt" onchange="readFile(this.files[0])" class="${input}">
+      <textarea id="u-text" rows="10" class="${input} font-mono text-xs" placeholder="Text from your PDF appears here. Fix any mistakes, or paste your questions directly."></textarea>
+      <details class="text-sm text-slate-400"><summary class="cursor-pointer">Required format</summary>
+        <pre class="mt-2 p-3 bg-ink rounded-lg text-xs overflow-x-auto">${esc(FORMAT_HELP)}</pre>
+        <p class="mt-2">Hint and Explanation are optional. Each question needs 4 options (A to D) and an Answer line. Marathi labels also work: उत्तर, सूचना, स्पष्टीकरण. The PDF must contain real text, not a scanned photo.</p></details>
+      <button class="${btn}" onclick="previewParsed()">Read questions</button>
+      <div id="u-preview"></div></div>`;
     return;
   }
-  const { data, error } = await sb.from('questions').select('*').order('id', { ascending: false });
+
+  if (tab === 'api') {
+    S.parsed = null;
+    app.innerHTML = `${head}<div class="${card} space-y-3">
+      <h2 class="font-semibold">Import questions from the online API</h2>
+      <div class="grid sm:grid-cols-4 gap-3">
+        <select id="i-lang" class="${input}">${opts(LANGS)}</select>
+        <select id="i-subject" class="${input}">${opts(Object.keys(API_CAT))}</select>
+        <select id="i-level" class="${input}">${opts(LEVELS)}</select>
+        <select id="i-count" class="${input}">${opts(['5', '10', '15', '20'], '10')}</select></div>
+      <p class="text-xs text-slate-400">Language, subject, difficulty, number of questions. Ready-made questions are fetched, you check them in a preview, and the ones you keep are saved to your own bank. Marathi and Hindi are auto-translated by a free service with a daily limit, so check the wording.</p>
+      <button class="${btn}" onclick="importApi()">Fetch questions</button>
+      <div id="u-preview"></div></div>`;
+    return;
+  }
+
+  if (tab === 'attempts') {
+    const { data, error } = await sb.from('attempts').select('*, profiles(full_name)').eq('teacher_id', S.user.id).order('created_at', { ascending: false }).limit(100);
+    if (error) return toast(error.message);
+    app.innerHTML = `${head}${data.length ? `<div class="overflow-x-auto ${card} !p-0"><table class="w-full text-sm">
+        <thead class="text-left text-slate-400"><tr><th class="p-3">Student</th><th>Subject</th><th>Level</th><th>Score</th><th>Date</th></tr></thead>
+        <tbody>${data.map(a => `<tr class="border-t border-edge"><td class="p-3">${esc(a.profiles?.full_name || 'Unnamed')}</td>
+          <td>${esc(a.subject)}</td><td>${esc(a.difficulty)}</td><td>${a.score}/${a.total}</td><td>${fmt(a.created_at)}</td></tr>`).join('')}</tbody></table></div>`
+      : `<p class="text-slate-400">No student has taken your questions yet.</p>`}`;
+    return;
+  }
+
+  const { data, error } = await sb.from('questions').select('*').eq('created_by', S.user.id).order('id', { ascending: false });
   if (error) return toast(error.message);
   S.tq = data; const e = S.edit;
-  app.innerHTML = `<h1 class="text-2xl font-extrabold mb-4">Teacher dashboard</h1>${tabs}
+  app.innerHTML = `${head}
     <div class="${card} space-y-3">
-      <h2 class="font-semibold">${e ? 'Edit question' : 'Add question'}</h2>
+      <h2 class="font-semibold">${e ? 'Edit question' : 'Add one question'}</h2>
       <div class="grid sm:grid-cols-3 gap-3">
         <select id="t-lang" class="${input}">${opts(LANGS, e?.language)}</select>
         <select id="t-subject" class="${input}">${opts(SUBJECTS, e?.subject)}</select>
@@ -417,15 +479,109 @@ async function viewTeacher(tab = 'questions') {
       <input id="t-hint" class="${input}" placeholder="Hint (optional)" value="${esc(e?.hint)}">
       <input id="t-exp" class="${input}" placeholder="Explanation shown in review (optional)" value="${esc(e?.explanation)}">
       <div class="flex gap-2"><button class="${btn}" onclick="saveQuestion()">${e ? 'Save changes' : 'Add question'}</button>
-        ${e ? `<button class="${btn2}" onclick="S.edit=null;viewTeacher()">Cancel</button>` : ''}</div></div>
-    <h2 class="font-semibold mt-6 mb-2">${data.length} questions in the bank</h2>
+        ${e ? `<button class="${btn2}" onclick="S.edit=null;viewTeacher('questions')">Cancel</button>` : ''}</div></div>
+    <h2 class="font-semibold mt-6 mb-2">${data.length} of your questions</h2>
     <div class="space-y-2">${data.map((q, i) => `
       <div class="${card} !p-4 flex justify-between gap-3">
         <div><p class="font-medium">${esc(q.question)}</p>
           <p class="text-xs text-slate-400">${esc(q.language)} · ${esc(q.subject)} · ${esc(q.difficulty)}</p></div>
-        <div class="flex gap-2 shrink-0 text-sm"><button class="${btn2} !py-1" onclick="S.edit=S.tq[${i}];viewTeacher()">Edit</button>
+        <div class="flex gap-2 shrink-0 text-sm"><button class="${btn2} !py-1" onclick="S.edit=S.tq[${i}];viewTeacher('questions')">Edit</button>
           <button class="${btn2} !py-1 text-rose-300" onclick="delQuestion(${i})">Delete</button></div></div>`).join('')}</div>`;
 }
+
+/* ---- PDF / text import ---- */
+async function readFile(f) {
+  if (!f) return;
+  try {
+    let text = '';
+    if (f.name.toLowerCase().endsWith('.pdf')) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      const pdf = await pdfjsLib.getDocument({ data: await f.arrayBuffer() }).promise;
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const content = await (await pdf.getPage(p)).getTextContent();
+        let y = null;
+        content.items.forEach(it => {
+          const iy = Math.round(it.transform[5]);
+          if (y !== null && Math.abs(iy - y) > 2) text += '\n';
+          text += it.str; y = iy;
+        });
+        text += '\n';
+      }
+    } else text = await f.text();
+    document.getElementById('u-text').value = text.trim();
+    toast(text.trim() ? 'File read. Check the text, then press "Read questions".' : 'No text found. This PDF may be a scanned photo. Paste the questions instead.');
+  } catch (e) { toast('Could not read this file: ' + e.message); }
+}
+
+function parseQuestions(text) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const reQ = /^(?:Q(?:uestion)?\.?\s*)?(\d+)\s*[\.\):\-]\s*(.+)$/i;
+  const reOpt = /^\(?([A-Da-d])[\.\)]\s*(.+)$/;
+  const reAns = /^(?:Answer|Ans|उत्तर|योग्य उत्तर|बरोबर उत्तर)\s*[:\-]\s*\(?([A-Da-d1-4])\)?/i;
+  const reHint = /^(?:Hint|सूचना|संकेत|टीप)\s*[:\-]\s*(.*)$/i;
+  const reExp = /^(?:Explanation|Exp|स्पष्टीकरण|विवरण)\s*[:\-]\s*(.*)$/i;
+  const all = []; let cur = null, field = null;
+  const start = q => { cur = { question: q, options: [], answer: -1, hint: '', explanation: '' }; all.push(cur); field = 'question'; };
+  for (const l of lines) {
+    let m;
+    if ((m = l.match(reAns)) && cur) { const c = m[1].toUpperCase(); cur.answer = /\d/.test(c) ? +c - 1 : 'ABCD'.indexOf(c); field = null; }
+    else if ((m = l.match(reHint)) && cur) { cur.hint = m[1]; field = 'hint'; }
+    else if ((m = l.match(reExp)) && cur) { cur.explanation = m[1]; field = 'explanation'; }
+    else if ((m = l.match(reOpt)) && cur && cur.options.length < 4) { cur.options.push(m[2]); field = 'option'; }
+    else if ((m = l.match(reQ)) && (!cur || cur.options.length || cur.answer >= 0)) start(m[2]);
+    else if (cur && field) {                      // wrapped line: continue the previous field
+      if (field === 'option') cur.options[cur.options.length - 1] += ' ' + l; else cur[field] += ' ' + l;
+    }
+  }
+  const qs = all.filter(q => q.question && q.options.length === 4 && q.answer >= 0 && q.answer < 4)
+    .map(q => ({ ...q, hint: q.hint || null, explanation: q.explanation || null }));
+  return { qs, skipped: all.length - qs.length };
+}
+
+function renderPreview(qs, skipped, saveCall) {
+  S.saveCall = saveCall;
+  document.getElementById('u-preview').innerHTML = qs.length ? `
+    <p class="text-sm mt-2">${qs.length} questions ready${skipped ? `, ${skipped} skipped (missing 4 options or the Answer line)` : ''}. Correct answers are in green. Remove any you don't want.</p>
+    <div class="space-y-2 mt-2 max-h-80 overflow-y-auto">${qs.map((q, i) => `
+      <div class="p-3 rounded-xl border border-edge text-sm flex justify-between gap-3"><div><b>${i + 1}. ${esc(q.question)}</b>
+        <ul class="mt-1 text-slate-300">${q.options.map((o, k) => `<li class="${k === q.answer ? 'text-emerald-400' : ''}">${'ABCD'[k]}) ${esc(o)}${k === q.answer ? ' ✓' : ''}</li>`).join('')}</ul></div>
+        <button class="${btn2} !py-1 text-rose-300 shrink-0 self-start" onclick="removeParsed(${i})">Remove</button></div>`).join('')}</div>
+    <button class="${btn} mt-3" onclick="${saveCall}">Save ${qs.length} questions</button>`
+    : `<p class="text-sm text-rose-300 mt-2">No questions to save. Check the required format or try again.</p>`;
+}
+function removeParsed(i) { S.parsed.splice(i, 1); renderPreview(S.parsed, 0, S.saveCall); }
+function previewParsed() {
+  const { qs, skipped } = parseQuestions(document.getElementById('u-text').value);
+  S.parsed = qs; renderPreview(qs, skipped, 'saveParsed()');
+}
+
+/* ---- import from the online API into the teacher's own bank ---- */
+async function importApi() {
+  const v = id => document.getElementById(id).value;
+  const c = { language: v('i-lang'), subject: v('i-subject'), difficulty: v('i-level'), count: +v('i-count') };
+  try {
+    toast('Fetching questions…');
+    const qs = await fetchApi(c);
+    S.parsed = qs.map(q => ({ question: q.question, options: q.options, answer: q.answer, hint: null, explanation: null }));
+    S.meta = { language: qs.failed ? 'English' : c.language, subject: c.subject, difficulty: c.difficulty };
+    if (qs.failed) toast('Translation limit reached, so these will be saved as English questions.');
+    renderPreview(S.parsed, 0, 'saveApi()');
+  } catch (e) { toast(e.message); }
+}
+async function saveApi() {
+  const rows = S.parsed.map(q => ({ ...q, ...S.meta, created_by: S.user.id }));
+  const { error } = await sb.from('questions').insert(rows);
+  if (error) return toast(error.message);
+  toast(rows.length + ' questions saved to your bank.'); viewTeacher('questions');
+}
+async function saveParsed() {
+  const v = id => document.getElementById(id).value;
+  const rows = S.parsed.map(q => ({ ...q, language: v('u-lang'), subject: v('u-subject'), difficulty: v('u-level'), created_by: S.user.id }));
+  const { error } = await sb.from('questions').insert(rows);
+  if (error) return toast(error.message);
+  toast(rows.length + ' questions saved.'); viewTeacher('questions');
+}
+
 async function saveQuestion() {
   const v = id => document.getElementById(id).value.trim();
   const options = [0, 1, 2, 3].map(k => v('t-o' + k));
@@ -436,13 +592,13 @@ async function saveQuestion() {
     ? await sb.from('questions').update(row).eq('id', S.edit.id)
     : await sb.from('questions').insert({ ...row, created_by: S.user.id });
   if (error) return toast(error.message);
-  toast(S.edit ? 'Question saved.' : 'Question added.'); S.edit = null; viewTeacher();
+  toast(S.edit ? 'Question saved.' : 'Question added.'); S.edit = null; viewTeacher('questions');
 }
 async function delQuestion(i) {
   if (!confirm('Delete this question?')) return;
   const { error } = await sb.from('questions').delete().eq('id', S.tq[i].id);
   if (error) return toast(error.message);
-  toast('Question deleted.'); viewTeacher();
+  toast('Question deleted.'); viewTeacher('questions');
 }
 
 /* ---------- start ---------- */
